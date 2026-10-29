@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON Schema フォーム ビルダー</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <header class="bg-indigo-700 text-white px-6 py-4">
+    <h1 class="text-xl font-bold">JSON Schema フォーム ビルダー</h1>
+    <p class="text-sm text-indigo-200 mt-1">JSON Schema を貼り付けてフォームをプレビュー・バリデーション</p>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- 左ペイン: Schema 入力 -->
+    <section aria-label="スキーマ入力" class="flex flex-col gap-4">
+      <div class="bg-white rounded-xl shadow p-4 flex flex-col gap-3">
+        <div class="flex items-center justify-between">
+          <h2 class="font-semibold text-gray-700">JSON Schema 入力</h2>
+          <div class="flex gap-2">
+            <button id="btn-sample" class="text-xs px-3 py-1 bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="サンプルスキーマを読み込む">サンプル</button>
+            <button id="btn-clear-schema" class="text-xs px-3 py-1 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-400" aria-label="スキーマをクリア">クリア</button>
+          </div>
+        </div>
+        <textarea
+          id="schema-input"
+          class="w-full h-64 font-mono text-xs border border-gray-300 rounded p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          aria-label="JSON Schema テキスト入力"
+          placeholder='{"type":"object","properties":{...},"required":[]}'
+          spellcheck="false"
+        ></textarea>
+        <div id="schema-error" role="alert" aria-live="polite" class="text-red-600 text-xs hidden"></div>
+      </div>
+
+      <!-- JSON 出力 -->
+      <div class="bg-white rounded-xl shadow p-4 flex flex-col gap-3">
+        <div class="flex items-center justify-between">
+          <h2 class="font-semibold text-gray-700">フォーム入力値 (JSON)</h2>
+          <button id="btn-copy-json" class="text-xs px-3 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 focus:outline-none focus:ring-2 focus:ring-green-500" aria-label="JSONをクリップボードにコピー">コピー</button>
+        </div>
+        <pre id="json-output" class="text-xs bg-gray-50 border border-gray-200 rounded p-3 overflow-auto h-40 whitespace-pre-wrap" aria-live="polite" aria-label="JSON出力"></pre>
+      </div>
+    </section>
+
+    <!-- 右ペイン: フォームプレビュー -->
+    <section aria-label="フォームプレビュー" class="flex flex-col gap-4">
+      <div class="bg-white rounded-xl shadow p-4 flex flex-col gap-4">
+        <h2 class="font-semibold text-gray-700">フォーム プレビュー</h2>
+        <form id="generated-form" novalidate role="form" aria-label="生成されたフォーム" class="flex flex-col gap-4">
+          <p id="form-placeholder" class="text-gray-400 text-sm">左にスキーマを入力するとフォームが表示されます</p>
+        </form>
+        <div id="validation-result" role="alert" aria-live="polite" class="hidden rounded p-3 text-sm"></div>
+        <div class="flex gap-2 mt-2">
+          <button id="btn-validate" class="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm" aria-label="バリデーション実行">バリデーション</button>
+          <button id="btn-reset-form" class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400 text-sm" aria-label="フォームをリセット">リセット</button>
+          <button id="btn-save-ls" class="px-4 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm" aria-label="LocalStorageに保存">保存</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'json-schema-form-builder-v1';
+    const schemaInput = document.getElementById('schema-input');
+    const schemaError = document.getElementById('schema-error');
+    const generatedForm = document.getElementById('generated-form');
+    const formPlaceholder = document.getElementById('form-placeholder');
+    const jsonOutput = document.getElementById('json-output');
+    const validationResult = document.getElementById('validation-result');
+
+    const SAMPLE_SCHEMA = {
+      type: 'object',
+      title: 'ユーザー登録',
+      required: ['name', 'email', 'age', 'agreed'],
+      properties: {
+        name: { type: 'string', title: '氏名', minLength: 2, maxLength: 50 },
+        email: { type: 'string', title: 'メールアドレス', format: 'email', minLength: 5 },
+        age: { type: 'number', title: '年齢', minimum: 0, maximum: 150 },
+        bio: { type: 'string', title: '自己紹介', maxLength: 200 },
+        role: { type: 'string', title: '役割', enum: ['admin', 'editor', 'viewer'] },
+        tags: { type: 'array', title: 'タグ', items: { type: 'string', enum: ['frontend', 'backend', 'devops', 'design', 'pm'] } },
+        agreed: { type: 'boolean', title: '利用規約に同意する' }
+      }
+    };
+
+    let currentSchema = null;
+
+    function showSchemaError(msg) {
+      schemaError.textContent = msg;
+      schemaError.classList.remove('hidden');
+    }
+    function hideSchemaError() {
+      schemaError.textContent = '';
+      schemaError.classList.add('hidden');
+    }
+
+    function parseSchema(text) {
+      try {
+        const s = JSON.parse(text);
+        if (s.type !== 'object') throw new Error('トップレベルは type: "object" が必要です');
+        if (!s.properties || typeof s.properties !== 'object') throw new Error('properties が必要です');
+        return s;
+      } catch (e) {
+        throw new Error(e.message);
+      }
+    }
+
+    function buildField(key, prop, required) {
+      const isRequired = required && required.includes(key);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'flex flex-col gap-1';
+
+      const label = document.createElement('label');
+      label.htmlFor = 'field-' + key;
+      const labelText = document.createTextNode((prop.title || key) + (isRequired ? ' *' : ''));
+      label.appendChild(labelText);
+      label.className = 'text-sm font-medium text-gray-700';
+      wrapper.appendChild(label);
+
+      let input;
+      const baseClass = 'border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500';
+
+      if (prop.type === 'boolean') {
+        const cbWrapper = document.createElement('div');
+        cbWrapper.className = 'flex items-center gap-2';
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        input.id = 'field-' + key;
+        input.name = key;
+        input.className = 'w-4 h-4 accent-indigo-600';
+        if (isRequired) input.setAttribute('aria-required', 'true');
+        const cbLabel = document.createElement('span');
+        cbLabel.textContent = prop.title || key;
+        cbLabel.className = 'text-sm text-gray-600';
+        cbWrapper.appendChild(input);
+        cbWrapper.appendChild(cbLabel);
+        wrapper.appendChild(cbWrapper);
+      } else if (prop.type === 'array' && prop.items && prop.items.enum) {
+        // multi-select checkboxes
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'flex flex-wrap gap-3';
+        groupDiv.setAttribute('role', 'group');
+        groupDiv.setAttribute('aria-label', prop.title || key);
+        prop.items.enum.forEach(optVal => {
+          const optId = 'field-' + key + '-' + optVal;
+          const optWrapper = document.createElement('label');
+          optWrapper.className = 'flex items-center gap-1 text-sm text-gray-700 cursor-pointer';
+          optWrapper.htmlFor = optId;
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.id = optId;
+          cb.name = key;
+          cb.value = optVal;
+          cb.className = 'w-4 h-4 accent-indigo-600';
+          const optText = document.createTextNode(optVal);
+          optWrapper.appendChild(cb);
+          optWrapper.appendChild(optText);
+          groupDiv.appendChild(optWrapper);
+        });
+        wrapper.appendChild(groupDiv);
+        input = groupDiv; // reference for value collection
+      } else if (prop.enum) {
+        input = document.createElement('select');
+        input.id = 'field-' + key;
+        input.name = key;
+        input.className = baseClass + ' bg-white';
+        if (isRequired) input.setAttribute('aria-required', 'true');
+        const emptyOpt = document.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = '-- 選択してください --';
+        input.appendChild(emptyOpt);
+        prop.enum.forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v;
+          input.appendChild(opt);
+        });
+        wrapper.appendChild(input);
+      } else if (prop.type === 'string' && (prop.maxLength && prop.maxLength > 100)) {
+        input = document.createElement('textarea');
+        input.id = 'field-' + key;
+        input.name = key;
+        input.rows = 3;
+        input.className = baseClass + ' resize-y';
+        if (isRequired) input.setAttribute('aria-required', 'true');
+        if (prop.maxLength) input.setAttribute('maxlength', prop.maxLength);
+        wrapper.appendChild(input);
+      } else {
+        input = document.createElement('input');
+        input.id = 'field-' + key;
+        input.name = key;
+        input.className = baseClass;
+        if (isRequired) input.setAttribute('aria-required', 'true');
+        if (prop.type === 'number') {
+          input.type = 'number';
+          if (prop.minimum !== undefined) input.min = prop.minimum;
+          if (prop.maximum !== undefined) input.max = prop.maximum;
+        } else {
+          input.type = 'text';
+          if (prop.minLength) input.minLength = prop.minLength;
+          if (prop.maxLength) input.maxLength = prop.maxLength;
+        }
+        wrapper.appendChild(input);
+      }
+
+      // constraint hint
+      const hints = [];
+      if (isRequired) hints.push('必須');
+      if (prop.minLength) hints.push('最小' + prop.minLength + '文字');
+      if (prop.maxLength) hints.push('最大' + prop.maxLength + '文字');
+      if (prop.minimum !== undefined) hints.push('最小値' + prop.minimum);
+      if (prop.maximum !== undefined) hints.push('最大値' + prop.maximum);
+      if (hints.length > 0) {
+        const hint = document.createElement('p');
+        hint.textContent = hints.join(' / ');
+        hint.className = 'text-xs text-gray-400';
+        wrapper.appendChild(hint);
+      }
+
+      // error span
+      const errSpan = document.createElement('span');
+      errSpan.id = 'error-' + key;
+      errSpan.className = 'text-xs text-red-600 hidden';
+      errSpan.setAttribute('role', 'alert');
+      wrapper.appendChild(errSpan);
+
+      // live update JSON
+      if (prop.type === 'array' && prop.items && prop.items.enum) {
+        wrapper.querySelectorAll('input[type=checkbox]').forEach(cb => {
+          cb.addEventListener('change', updateJsonOutput);
+        });
+      } else if (input && input.tagName) {
+        input.addEventListener('input', updateJsonOutput);
+        input.addEventListener('change', updateJsonOutput);
+      }
+
+      return wrapper;
+    }
+
+    function buildForm(schema) {
+      // clear
+      while (generatedForm.firstChild) generatedForm.removeChild(generatedForm.firstChild);
+      formPlaceholder.style.display = 'none';
+
+      if (schema.title) {
+        const h = document.createElement('h3');
+        h.textContent = schema.title;
+        h.className = 'text-base font-bold text-gray-800';
+        generatedForm.appendChild(h);
+      }
+
+      Object.entries(schema.properties).forEach(([key, prop]) => {
+        const field = buildField(key, prop, schema.required);
+        generatedForm.appendChild(field);
+      });
+
+      updateJsonOutput();
+    }
+
+    function getFormValues() {
+      if (!currentSchema) return {};
+      const values = {};
+      Object.entries(currentSchema.properties).forEach(([key, prop]) => {
+        if (prop.type === 'boolean') {
+          const el = document.getElementById('field-' + key);
+          if (el) values[key] = el.checked;
+        } else if (prop.type === 'array' && prop.items && prop.items.enum) {
+          const checked = generatedForm.querySelectorAll('input[name="' + key + '"]:checked');
+          values[key] = Array.from(checked).map(c => c.value);
+        } else if (prop.enum) {
+          const el = document.getElementById('field-' + key);
+          if (el) values[key] = el.value;
+        } else {
+          const el = document.getElementById('field-' + key);
+          if (el) {
+            const v = el.value;
+            if (prop.type === 'number') {
+              values[key] = v === '' ? '' : Number(v);
+            } else {
+              values[key] = v;
+            }
+          }
+        }
+      });
+      return values;
+    }
+
+    function updateJsonOutput() {
+      const vals = getFormValues();
+      jsonOutput.textContent = JSON.stringify(vals, null, 2);
+    }
+
+    function validateForm() {
+      if (!currentSchema) return;
+      const vals = getFormValues();
+      const errors = [];
+
+      // clear previous errors
+      generatedForm.querySelectorAll('[id^="error-"]').forEach(el => {
+        el.textContent = '';
+        el.classList.add('hidden');
+      });
+
+      Object.entries(currentSchema.properties).forEach(([key, prop]) => {
+        const isRequired = currentSchema.required && currentSchema.required.includes(key);
+        const val = vals[key];
+        const errEl = document.getElementById('error-' + key);
+
+        const addErr = (msg) => {
+          errors.push(msg);
+          if (errEl) {
+            errEl.textContent = msg;
+            errEl.classList.remove('hidden');
+          }
+        };
+
+        if (isRequired) {
+          if (prop.type === 'boolean') {
+            if (!val) addErr((prop.title || key) + ' は必須です');
+          } else if (prop.type === 'array') {
+            if (!Array.isArray(val) || val.length === 0) addErr((prop.title || key) + ' を1つ以上選択してください');
+          } else {
+            if (val === '' || val === null || val === undefined) addErr((prop.title || key) + ' は必須です');
+          }
+        }
+
+        if (val !== '' && val !== null && val !== undefined) {
+          if (prop.type === 'number' && typeof val === 'number') {
+            if (prop.minimum !== undefined && val < prop.minimum) addErr((prop.title || key) + ' は ' + prop.minimum + ' 以上にしてください');
+            if (prop.maximum !== undefined && val > prop.maximum) addErr((prop.title || key) + ' は ' + prop.maximum + ' 以下にしてください');
+          }
+          if (prop.type === 'string' && typeof val === 'string' && val.length > 0) {
+            if (prop.minLength && val.length < prop.minLength) addErr((prop.title || key) + ' は ' + prop.minLength + ' 文字以上必要です');
+            if (prop.maxLength && val.length > prop.maxLength) addErr((prop.title || key) + ' は ' + prop.maxLength + ' 文字以内にしてください');
+          }
+        }
+      });
+
+      if (errors.length === 0) {
+        validationResult.textContent = 'バリデーション成功: エラーなし';
+        validationResult.className = 'rounded p-3 text-sm bg-green-50 text-green-700 border border-green-200';
+      } else {
+        validationResult.textContent = 'バリデーションエラー: ' + errors.length + '件 — ' + errors.join(' / ');
+        validationResult.className = 'rounded p-3 text-sm bg-red-50 text-red-700 border border-red-200';
+      }
+      validationResult.classList.remove('hidden');
+    }
+
+    function processSchema(text) {
+      hideSchemaError();
+      if (!text.trim()) {
+        currentSchema = null;
+        while (generatedForm.firstChild) generatedForm.removeChild(generatedForm.firstChild);
+        generatedForm.appendChild(formPlaceholder);
+        formPlaceholder.style.display = '';
+        jsonOutput.textContent = '';
+        return;
+      }
+      try {
+        const schema = parseSchema(text);
+        currentSchema = schema;
+        buildForm(schema);
+      } catch (e) {
+        showSchemaError('スキーマ解析エラー: ' + e.message);
+        currentSchema = null;
+      }
+    }
+
+    schemaInput.addEventListener('input', () => {
+      processSchema(schemaInput.value);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ schema: schemaInput.value }));
+    });
+
+    document.getElementById('btn-sample').addEventListener('click', () => {
+      schemaInput.value = JSON.stringify(SAMPLE_SCHEMA, null, 2);
+      processSchema(schemaInput.value);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ schema: schemaInput.value }));
+    });
+
+    document.getElementById('btn-clear-schema').addEventListener('click', () => {
+      schemaInput.value = '';
+      processSchema('');
+      localStorage.removeItem(STORAGE_KEY);
+    });
+
+    document.getElementById('btn-validate').addEventListener('click', validateForm);
+
+    document.getElementById('btn-reset-form').addEventListener('click', () => {
+      if (!currentSchema) return;
+      generatedForm.querySelectorAll('input, select, textarea').forEach(el => {
+        if (el.type === 'checkbox') el.checked = false;
+        else el.value = '';
+      });
+      validationResult.classList.add('hidden');
+      updateJsonOutput();
+    });
+
+    document.getElementById('btn-save-ls').addEventListener('click', () => {
+      if (!currentSchema) return;
+      const data = { schema: schemaInput.value, values: getFormValues() };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      const btn = document.getElementById('btn-save-ls');
+      const orig = btn.textContent;
+      btn.textContent = '保存済';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+
+    document.getElementById('btn-copy-json').addEventListener('click', () => {
+      const text = jsonOutput.textContent;
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('btn-copy-json');
+        const orig = btn.textContent;
+        btn.textContent = 'コピー済';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      });
+    });
+
+    // restore from localStorage
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (data.schema) {
+          schemaInput.value = data.schema;
+          processSchema(data.schema);
+          // restore values
+          if (data.values && currentSchema) {
+            Object.entries(data.values).forEach(([key, val]) => {
+              const prop = currentSchema.properties[key];
+              if (!prop) return;
+              if (prop.type === 'boolean') {
+                const el = document.getElementById('field-' + key);
+                if (el) el.checked = !!val;
+              } else if (prop.type === 'array') {
+                if (Array.isArray(val)) {
+                  val.forEach(v => {
+                    const cb = generatedForm.querySelector('input[name="' + key + '"][value="' + v + '"]');
+                    if (cb) cb.checked = true;
+                  });
+                }
+              } else {
+                const el = document.getElementById('field-' + key);
+                if (el) el.value = val;
+              }
+            });
+            updateJsonOutput();
+          }
+        }
+      } catch {}
+    }
+  </script>
+</body>
+</html>
